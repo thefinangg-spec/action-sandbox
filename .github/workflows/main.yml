@@ -1,4 +1,66 @@
-name: Secure Ubuntu Runner Setup
+name: Long-Running Ubuntu Server
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        required: true
+        type: string
+      password:
+        required: true
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Mask & Setup
+      run: |
+        echo "::add-mask::${{ inputs.username }}"
+        echo "::add-mask::${{ inputs.password }}"
+        
+        # Setup SSH
+        sudo apt-get update
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
+        sudo systemctl enable --now ssh
+        
+        # Create user
+        sudo useradd -m -s /bin/bash -G sudo ${{ inputs.username }}
+        echo "${{ inputs.username }}:${{ inputs.password }}" | sudo chpasswd
+        
+        # Start Tailscale
+        sudo docker run -d --name=tailscaled \
+          -v /var/lib:/var/lib -v /dev/net/tun:/dev/net/tun \
+          --network=host --cap-add=NET_ADMIN --cap-add=NET_RAW \
+          --env TS_AUTHKEY="${{ secrets.TS_AUTH_KEY }}" \
+          --env TS_EXTRA_ARGS=--ssh \
+          tailscale/tailscale
+          
+        sleep 10
+        TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
+        
+        # Create status file
+        cat > /tmp/runner_info.txt << EOF
+        ╔════════════════════════════════════════╗
+        ║     RUNNER ACTIVE - 4 HOURS            ║
+        ╠════════════════════════════════════════╣
+        ║ SSH: ssh ${{ inputs.username }}@${TS_IP}
+        ║ Time: Active until $(date -d "+4 hours" '+%Y-%m-%d %H:%M:%S')
+        ╚════════════════════════════════════════╝
+        EOF
+        
+        cat /tmp/runner_info.txt
+        
+    - name: Keep Alive with Heartbeat
+      run: |
+        END_TIME=$(date -d "+4 hours" +%s)
+        
+        while [ $(date +%s) -lt $END_TIME ]; do
+          REMAINING=$((END_TIME - $(date +%s)))
+          echo "[$(date '+%H:%M:%S')] Heartbeat - ${REMAINING} seconds remaining"
+          sleep 60  # Check every minute
+        donename: Secure Ubuntu Runner Setup
 
 on:
   workflow_dispatch:
