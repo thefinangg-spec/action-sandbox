@@ -1,66 +1,4 @@
-name: Long-Running Ubuntu Server
-
-on:
-  workflow_dispatch:
-    inputs:
-      username:
-        required: true
-        type: string
-      password:
-        required: true
-        type: string
-
-jobs:
-  setup:
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Mask & Setup
-      run: |
-        echo "::add-mask::${{ inputs.username }}"
-        echo "::add-mask::${{ inputs.password }}"
-        
-        # Setup SSH
-        sudo apt-get update
-        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
-        sudo systemctl enable --now ssh
-        
-        # Create user
-        sudo useradd -m -s /bin/bash -G sudo ${{ inputs.username }}
-        echo "${{ inputs.username }}:${{ inputs.password }}" | sudo chpasswd
-        
-        # Start Tailscale
-        sudo docker run -d --name=tailscaled \
-          -v /var/lib:/var/lib -v /dev/net/tun:/dev/net/tun \
-          --network=host --cap-add=NET_ADMIN --cap-add=NET_RAW \
-          --env TS_AUTHKEY="${{ secrets.TS_AUTH_KEY }}" \
-          --env TS_EXTRA_ARGS=--ssh \
-          tailscale/tailscale
-          
-        sleep 10
-        TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
-        
-        # Create status file
-        cat > /tmp/runner_info.txt << EOF
-        ╔════════════════════════════════════════╗
-        ║     RUNNER ACTIVE - 4 HOURS            ║
-        ╠════════════════════════════════════════╣
-        ║ SSH: ssh ${{ inputs.username }}@${TS_IP}
-        ║ Time: Active until $(date -d "+4 hours" '+%Y-%m-%d %H:%M:%S')
-        ╚════════════════════════════════════════╝
-        EOF
-        
-        cat /tmp/runner_info.txt
-        
-    - name: Keep Alive with Heartbeat
-      run: |
-        END_TIME=$(date -d "+4 hours" +%s)
-        
-        while [ $(date +%s) -lt $END_TIME ]; do
-          REMAINING=$((END_TIME - $(date +%s)))
-          echo "[$(date '+%H:%M:%S')] Heartbeat - ${REMAINING} seconds remaining"
-          sleep 60  # Check every minute
-        donename: Secure Ubuntu Runner Setup
+name: UBUNTU SSH - VIA TAILSCALE
 
 on:
   workflow_dispatch:
@@ -73,6 +11,17 @@ on:
         description: 'Password for the user'
         required: true
         type: string
+      duration_hours:
+        description: 'Hours to keep alive'
+        required: false
+        default: '4'
+        type: choice
+        options:
+          - '1'
+          - '2'
+          - '4'
+          - '6'
+          - '8'
 
 jobs:
   setup:
@@ -102,10 +51,6 @@ jobs:
         # Set password without echoing to logs
         echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
         
-        # Force password change on first login (optional but secure)
-        # sudo passwd -e "${USERNAME}"
-        
-        # Verify but don't show sensitive data
         echo "User ${USERNAME} added to sudo group"
         
     - name: Run Tailscale Container
@@ -130,22 +75,40 @@ jobs:
         TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
         
         cat << EOF
-        ╔════════════════════════════════════════════╗
-        ║         ✅ SETUP COMPLETE ✅                ║
-        ╠════════════════════════════════════════════╣
-        ║ User:        ${{ inputs.username }}        ║
-        ║ SSH Status:  Active                        ║
-        ║ Tailscale IP: ${TS_IP}                     ║
-        ╠════════════════════════════════════════════╣
-        ║ Connect via:                               ║
-        ║ ssh ${{ inputs.username }}@${TS_IP}        ║
-        ╚════════════════════════════════════════════╝
+        ╔══════════════════════════════════════════════════════════╗
+        ║              🚀 RUNNER IS ACTIVE 🚀                       ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ User:        ${{ inputs.username }}                      ║
+        ║ SSH Status:  Active                                      ║
+        ║ Tailscale IP: ${TS_IP}                                   ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ Connect via:                                             ║
+        ║ ssh ${{ inputs.username }}@${TS_IP}                      ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ ⏰ This runner will stay alive for ${{ inputs.duration_hours }} hours ║
+        ║ 🛑 Cancel job in GitHub UI to stop early                 ║
+        ╚══════════════════════════════════════════════════════════╝
         EOF
         
         echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
         
-    - name: Debug (Optional - Shows masked values as ***)
-      if: runner.debug == '1'
+    - name: Keep Alive with Heartbeat
       run: |
-        echo "Username length: ${{ github.event.inputs.username }} | wc -c"
-        echo "Password set: Yes (masked)"
+        DURATION_HOURS=${{ inputs.duration_hours }}
+        END_TIME=$(date -d "+${DURATION_HOURS} hours" +%s)
+        
+        echo "⏳ Keeping runner alive for ${DURATION_HOURS} hours..."
+        echo "💡 You can now SSH into this runner using the IP above"
+        echo ""
+        
+        while [ $(date +%s) -lt $END_TIME ]; do
+          REMAINING=$((END_TIME - $(date +%s)))
+          HOURS=$((REMAINING / 3600))
+          MINUTES=$(((REMAINING % 3600) / 60))
+          SECONDS=$((REMAINING % 60))
+          
+          echo -ne "\r⏰ Runner alive for another ${HOURS}h ${MINUTES}m ${SECONDS}s... (Cancel job to stop early)   "
+          sleep 10
+        done
+        
+        echo -e "\n\n⏰ Time's up! Runner will now terminate."
