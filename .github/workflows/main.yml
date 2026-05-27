@@ -1,0 +1,100 @@
+name: Setup Ubuntu Runner with SSH and Tailscale
+
+on:
+  workflow_dispatch:
+    inputs:
+      username:
+        description: 'Username to create'
+        required: true
+        type: string
+      password:
+        description: 'Password for the user'
+        required: true
+        type: string
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Install and Configure OpenSSH Server
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y openssh-server
+        sudo systemctl enable ssh
+        sudo systemctl start ssh
+        sudo systemctl status ssh --no-pager
+        
+    - name: Create Custom User with Password
+      run: |
+        # Create user with home directory and bash shell
+        sudo useradd -m -s /bin/bash -G sudo ${{ inputs.username }}
+        
+        # Set password
+        echo "${{ inputs.username }}:${{ inputs.password }}" | sudo chpasswd
+        
+        # Force password change on first login (optional)
+        # sudo passwd -e ${{ inputs.username }}
+        
+        # Verify user creation
+        echo "User ${{ inputs.username }} created successfully"
+        id ${{ inputs.username }}
+        
+    - name: Run Tailscale Docker Container
+      env:
+        TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
+      run: |
+        # Create necessary directories
+        sudo mkdir -p /var/lib/tailscale
+        
+        # Run tailscaled container
+        sudo docker run -d \
+          --name=tailscaled \
+          -v /var/lib:/var/lib \
+          -v /dev/net/tun:/dev/net/tun \
+          --network=host \
+          --cap-add=NET_ADMIN \
+          --cap-add=NET_RAW \
+          --env TS_AUTHKEY=${TS_AUTH_KEY} \
+          --env TS_EXTRA_ARGS=--ssh \
+          tailscale/tailscale
+          
+        # Wait for Tailscale to initialize
+        echo "Waiting for Tailscale to start..."
+        sleep 10
+        
+    - name: Get Tailscale IP Address
+      run: |
+        # Get Tailscale IP from the container
+        TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
+        
+        # Also get the machine name/hostname
+        TS_HOSTNAME=$(sudo docker exec tailscaled tailscale status | grep -E '^[0-9]' | awk '{print $2}')
+        
+        # Display clean output
+        echo "=========================================="
+        echo "✅ Setup Complete!"
+        echo "=========================================="
+        echo "📝 User Information:"
+        echo "   Username: ${{ inputs.username }}"
+        echo "   SSH Service: Running on port 22"
+        echo ""
+        echo "🌐 Tailscale Information:"
+        echo "   IPv4 Address: ${TS_IP}"
+        echo "   Hostname: ${TS_HOSTNAME:-$(hostname)}"
+        echo "   Status: Connected"
+        echo ""
+        echo "🔑 Connect via SSH using Tailscale:"
+        echo "   ssh ${{ inputs.username }}@${TS_IP}"
+        echo "   or"
+        echo "   ssh ${{ inputs.username }}@${TS_HOSTNAME}"
+        echo "=========================================="
+        
+        # Save to GitHub Actions output for later steps
+        echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
+        
+    - name: Display Container Logs (if needed)
+      if: always()
+      run: |
+        echo "Tailscale container logs:"
+        sudo docker logs tailscaled --tail 20
