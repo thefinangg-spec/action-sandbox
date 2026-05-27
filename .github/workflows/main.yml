@@ -1,4 +1,4 @@
-name: UBUNTU SSH - VIA TAILSCALE
+name: Long-Running Ubuntu Server
 
 on:
   workflow_dispatch:
@@ -32,28 +32,34 @@ jobs:
       run: |
         echo "::add-mask::${{ inputs.username }}"
         echo "::add-mask::${{ inputs.password }}"
-        echo "Sensitive data masked"
         
-    - name: Install OpenSSH Server
+    - name: Install and Configure OpenSSH Server
       run: |
         sudo apt-get update
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
         sudo systemctl enable --now ssh
         
-    - name: Create User (Password Hidden)
+        # Allow password authentication
+        sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        sudo systemctl restart ssh
+        
+    - name: Create User
       env:
         USERNAME: ${{ inputs.username }}
         PASSWORD: ${{ inputs.password }}
       run: |
-        # Create user
+        # Create user with home directory
         sudo useradd -m -s /bin/bash -G sudo "${USERNAME}"
         
-        # Set password without echoing to logs
+        # Set password
         echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
         
-        echo "User ${USERNAME} added to sudo group"
+        # Verify user exists
+        echo "✅ User created:"
+        id "${USERNAME}"
         
-    - name: Run Tailscale Container
+    - name: Run Tailscale Container (SSH disabled)
       env:
         TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
       run: |
@@ -65,32 +71,37 @@ jobs:
           --cap-add=NET_ADMIN \
           --cap-add=NET_RAW \
           --env TS_AUTHKEY="${TS_AUTH_KEY}" \
-          --env TS_EXTRA_ARGS=--ssh \
           tailscale/tailscale
           
         sleep 10
+        
+        # Get Tailscale IP
+        TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
+        echo "Tailscale IP: ${TS_IP}"
+        echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
         
     - name: Display Connection Info
       run: |
         TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
         
         cat << EOF
+        
         ╔══════════════════════════════════════════════════════════╗
         ║              🚀 RUNNER IS ACTIVE 🚀                       ║
         ╠══════════════════════════════════════════════════════════╣
         ║ User:        ${{ inputs.username }}                      ║
-        ║ SSH Status:  Active                                      ║
+        ║ Password:    [the password you entered]                  ║
+        ║ SSH Status:  Active (Port 22)                            ║
         ║ Tailscale IP: ${TS_IP}                                   ║
         ╠══════════════════════════════════════════════════════════╣
-        ║ Connect via:                                             ║
+        ║ 🔑 CONNECT COMMAND:                                       ║
         ║ ssh ${{ inputs.username }}@${TS_IP}                      ║
         ╠══════════════════════════════════════════════════════════╣
-        ║ ⏰ This runner will stay alive for ${{ inputs.duration_hours }} hours ║
+        ║ ⏰ Runner will stay alive for ${{ inputs.duration_hours }} hours ║
         ║ 🛑 Cancel job in GitHub UI to stop early                 ║
         ╚══════════════════════════════════════════════════════════╝
-        EOF
         
-        echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
+        EOF
         
     - name: Keep Alive with Heartbeat
       run: |
@@ -98,7 +109,7 @@ jobs:
         END_TIME=$(date -d "+${DURATION_HOURS} hours" +%s)
         
         echo "⏳ Keeping runner alive for ${DURATION_HOURS} hours..."
-        echo "💡 You can now SSH into this runner using the IP above"
+        echo "💡 You can now SSH into this runner"
         echo ""
         
         while [ $(date +%s) -lt $END_TIME ]; do
