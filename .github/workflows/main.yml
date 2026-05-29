@@ -1,4 +1,4 @@
-name: Long-Running Ubuntu Server
+name: Tailscaled Ubuntu
 
 on:
   workflow_dispatch:
@@ -39,15 +39,12 @@ jobs:
         sudo DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server
         sudo systemctl enable --now ssh
         
-        # Ensure password authentication is enabled
+        # Allow password authentication
         sudo sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
         sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
-        sudo sed -i 's/#ChallengeResponseAuthentication yes/ChallengeResponseAuthentication yes/' /etc/ssh/sshd_config
-        
-        # Restart SSH to apply changes
         sudo systemctl restart ssh
         
-    - name: Create User with Password
+    - name: Create User
       env:
         USERNAME: ${{ inputs.username }}
         PASSWORD: ${{ inputs.password }}
@@ -58,88 +55,52 @@ jobs:
         # Set password
         echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
         
-        # Force password change on first login (optional - removes for convenience)
-        # sudo chage -d 0 "${USERNAME}"
-        
         # Verify user exists
         echo "✅ User created:"
         id "${USERNAME}"
         
-    - name: Run Tailscale Container with SSH Enabled
+    - name: Run Tailscale Container (SSH disabled)
       env:
         TS_AUTH_KEY: ${{ secrets.TS_AUTH_KEY }}
       run: |
-        # Create Tailscale data directory
-        sudo mkdir -p /var/lib/tailscale
-        
         sudo docker run -d \
           --name=tailscaled \
-          --restart=unless-stopped \
-          -v /var/lib/tailscale:/var/lib/tailscale \
+          -v /var/lib:/var/lib \
           -v /dev/net/tun:/dev/net/tun \
           --network=host \
           --cap-add=NET_ADMIN \
           --cap-add=NET_RAW \
-          --env TS_AUTHKEY="${TS_AUTH_KEY}" \
           --env TS_EXTRA_ARGS="--ssh" \
+          --env TS_AUTHKEY="${TS_AUTH_KEY}" \
           tailscale/tailscale
-        
-        # Wait for Tailscale to initialize with improved checking
-        echo "⏳ Waiting for Tailscale to connect..."
-        for i in {1..30}; do
-          if sudo docker exec tailscaled tailscale status 2>/dev/null | grep -q "Logged out"; then
-            echo "❌ Tailscale not authenticated - check your TS_AUTH_KEY secret"
-            sudo docker logs tailscaled
-            exit 1
-          fi
           
-          TS_IP=$(sudo docker exec tailscaled tailscale ip -4 2>/dev/null | grep -v "^$" | head -1)
-          if [[ -n "${TS_IP}" ]] && [[ "${TS_IP}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "✅ Tailscale connected successfully"
-            echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
-            break
-          fi
-          sleep 2
-        done
+        sleep 10
         
-        if [[ -z "${TS_IP}" ]]; then
-          echo "❌ Failed to get Tailscale IP after 60 seconds"
-          echo "Tailscale logs:"
-          sudo docker logs tailscaled
-          exit 1
-        fi
-        
-        # Verify Tailscale SSH is enabled
-        sudo docker exec tailscaled tailscale set --ssh
-        echo "✅ Tailscale SSH feature enabled"
+        # Get Tailscale IP
+        TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
+        echo "Tailscale IP: ${TS_IP}"
+        echo "tailscale_ip=${TS_IP}" >> $GITHUB_OUTPUT
         
     - name: Display Connection Info
       run: |
         TS_IP=$(sudo docker exec tailscaled tailscale ip -4)
-        TS_HOSTNAME=$(sudo docker exec tailscaled tailscale status --json | python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('Self', {}).get('HostName', 'unknown'))" 2>/dev/null || echo "unknown")
         
         cat << EOF
         
-        ╔══════════════════════════════════════════════════════════════════╗
-        ║                    🚀 RUNNER IS ACTIVE 🚀                         ║
-        ╠══════════════════════════════════════════════════════════════════╣
-        ║ User:        ${{ inputs.username }}                              ║
-        ║ Password:    [the password you entered]                          ║
-        ║ SSH Status:  Active (Password authentication enabled)            ║
-        ║ Tailscale IP: ${TS_IP}                                           ║
-        ╠══════════════════════════════════════════════════════════════════╣
-        ║ 🔑 CONNECT COMMAND:                                               ║
-        ║                                                                  ║
-        ║   ssh ${{ inputs.username }}@${TS_IP}                           ║
-        ║                                                                  ║
-        ║ 📝 Then enter the password you provided                          ║
-        ║                                                                  ║
-        ║ 💡 Tailscale SSH also available:                                 ║
-        ║   tailscale ssh ${{ inputs.username }}@${TS_HOSTNAME}           ║
-        ╠══════════════════════════════════════════════════════════════════╣
-        ║ ⏰ Runner will stay alive for ${{ inputs.duration_hours }} hours  ║
-        ║ 🛑 Cancel job in GitHub UI to stop early                         ║
-        ╚══════════════════════════════════════════════════════════════════╝
+        ╔══════════════════════════════════════════════════════════╗
+        ║              🚀 RUNNER IS ACTIVE 🚀                       ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ User:        ${{ inputs.username }}                      ║
+        ║ Password:    [the password you entered]                  ║
+        ║ SSH Status:  Active (Port 22)                            ║
+        ║ Tailscale IP: ${TS_IP}                                   ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ 🔑 CONNECT COMMAND:                                       ║
+        ║ ssh ${{ inputs.username }}@${TS_IP}                      ║
+        ╠══════════════════════════════════════════════════════════╣
+        ║ ⏰ Runner will stay alive for ${{ inputs.duration_hours }} hours ║
+        ║ 🛑 Cancel job in GitHub UI to stop early                 ║
+        ╚══════════════════════════════════════════════════════════╝
         
         EOF
         
@@ -149,9 +110,7 @@ jobs:
         END_TIME=$(date -d "+${DURATION_HOURS} hours" +%s)
         
         echo "⏳ Keeping runner alive for ${DURATION_HOURS} hours..."
-        echo "💡 You can now SSH into this runner using the command above"
-        echo ""
-        echo "⚠️  Note: Password will be sent over Tailscale network (encrypted)"
+        echo "💡 You can now SSH into this runner"
         echo ""
         
         while [ $(date +%s) -lt $END_TIME ]; do
@@ -160,23 +119,8 @@ jobs:
           MINUTES=$(((REMAINING % 3600) / 60))
           SECONDS=$((REMAINING % 60))
           
-          # Update every 60 seconds to reduce GitHub API calls
           echo -ne "\r⏰ Runner alive for another ${HOURS}h ${MINUTES}m ${SECONDS}s... (Cancel job to stop early)   "
-          sleep 60
+          sleep 10
         done
         
         echo -e "\n\n⏰ Time's up! Runner will now terminate."
-        
-    - name: Cleanup on Completion
-      if: always()
-      run: |
-        echo "🧹 Cleaning up..."
-        
-        # Stop and remove Tailscale container
-        sudo docker stop tailscaled 2>/dev/null || true
-        sudo docker rm tailscaled 2>/dev/null || true
-        
-        # Optional: Remove the created user (uncomment if desired)
-        # sudo userdel -r ${{ inputs.username }} 2>/dev/null || true
-        
-        echo "✅ Cleanup complete"
